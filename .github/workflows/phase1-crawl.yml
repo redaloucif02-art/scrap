@@ -1,0 +1,98 @@
+name: "Phase 1 — Découverte structure sites agences"
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk_size:
+        description: "Nombre de sites par shard"
+        required: false
+        default: "400"
+      concurrency:
+        description: "Requêtes simultanées par shard"
+        required: false
+        default: "10"
+      max_links:
+        description: "Plafond de pages en crawl BFS fallback"
+        required: false
+        default: "50"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.chunks.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Découper agences.csv en tranches
+        id: chunks
+        run: |
+          MATRIX=$(python scripts/compute_chunks.py --input data/agences.csv --chunk-size "${{ inputs.chunk_size }}")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Crawl shard [${{ matrix.start }}:${{ matrix.end }}]
+        run: |
+          python scripts/crawl_phase1.py \
+            --input data/agences.csv \
+            --output "data/phase1_out_${{ matrix.start }}.csv" \
+            --start "${{ matrix.start }}" \
+            --end "${{ matrix.end }}" \
+            --max-links "${{ inputs.max_links }}" \
+            --concurrency "${{ inputs.concurrency }}"
+
+      - name: Upload artifact du shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-shard-${{ matrix.start }}
+          path: data/phase1_out_${{ matrix.start }}.csv
+          retention-days: 30
+
+  merge:
+    needs: crawl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Télécharger tous les shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: phase1-shard-*
+          path: artifacts
+
+      - name: Fusionner en un seul CSV
+        run: |
+          python scripts/merge_outputs.py \
+            --pattern "artifacts/**/phase1_out_*.csv" \
+            --output phase1_final.csv
+
+      - name: Upload artifact final
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-final
+          path: phase1_final.csv
+          retention-days: 30
